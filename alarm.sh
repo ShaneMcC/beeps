@@ -1,3 +1,4 @@
+#!/bin/sh
 # http://www.reddit.com/r/linux/comments/18h8v5/does_anyone_have_or_know_a_source_for_beep_scripts/
 
 for n in 1 2 3 4 5 6 7 8 9 0; do

@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 
 # https://github.com/PolishProgrammer/BeepingPenguin
 
@@ -73,7 +73,7 @@ beep -f 523.25 -r 2 -l 80 -D 160 #next note formation same
 beep -f 440 -r 2 -l 40 -D 80
 beep -f 440 -r 1 -l 80 -D 160
 beep -f 523.25 -r 2 -l 80 -D 160
-#t 13 
+#t 13
 beep -f 440 -r 2 -l 40 -D 80
 beep -f 523.25 -r 1 -l 80 -D 160
 

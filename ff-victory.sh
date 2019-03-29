@@ -1,3 +1,4 @@
+#!/bin/sh
 # https://ubuntuforums.org/showthread.php?t=1157670&page=4
 beep -f 784 -r 3 -l 100
 sleep .1

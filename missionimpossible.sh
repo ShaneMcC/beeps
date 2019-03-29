@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 
 # https://www.kirrus.co.uk/2014/02/linux-beep-music-2/
 
