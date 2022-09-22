@@ -1,0 +1,137 @@
+#!/bin/bash
+
+main(){
+	trap 'tput cnorm;exit' INT
+	trap 'tput cnorm;echo;exit' EXIT
+	tput civis
+
+	if [ $# = 0 ];then
+		set -- "$(fzf --reverse)" || exit
+		[ "$1" = "" ] && exit
+	fi
+
+	for file;do
+		sleep 0.3
+
+		if [ ! -e "$file" ];then
+			echo "$0: $file: No such a file or directory" >&2
+			continue
+
+		elif [ -d "$file" ];then
+			echo "$0: $file: Is a directory" >&2
+			continue
+
+		elif [ ! -r "$file" ];then
+			echo "$0: $file: Permission denied" >&2
+			continue
+
+		fi
+
+		beepArgs=()
+		totaltime=0
+
+		source "$(dirname -- "$file")/${file##*/}"
+		printf "\r%$(tput cols)s"
+
+		if [ "$totaltime" = 0 ];then
+			echo "${0##*/}: $file: Not a beep file (totaltime is 0)" >&2
+			continue
+		fi
+
+		realBeep "${beepArgs[@]}"
+	done
+}
+
+beep(){
+	len=200
+	delay=100
+	repeat=1
+	afterLast=0
+
+	beepArgs+=(-n "$@")
+
+	# totaltime loop
+	while :;do
+		case $1 in
+			-n|--new)((totaltime+=(len+delay)*repeat + delay*afterLast))
+				len=200
+				delay=100
+				repeat=1
+				afterLast=0
+				;;
+			-f)shift;;
+			-l)shift; len=$1;;
+			-d)shift; afterLast=0; delay=$1;;
+			-D)shift; afterLast=1; delay=$1;;
+			-r)shift; repeat=$1;;
+			-f*);;
+			-l*)len=${1#??};;
+			-d*)afterLast=0; delay=${1#??};;
+			-D*)afterLast=1; delay=${1#??};;
+			-r*)repeat=${1#??};;
+		esac
+
+		[ $# = 1 ] && break
+		shift
+	done
+	((totaltime+=(len+delay)*repeat + delay*afterLast))
+
+}
+
+realBeep(){
+	shift
+	freq=440
+	len=200
+	delay=100
+	repeat=1
+	afterLast=0
+	passedTime=0
+
+	# True beep loop
+	while :;do
+		case $1 in 
+			-n|--new|"")((passedTime+=(len+delay)*repeat + delay*afterLast))
+				printf "\r$file [%-10s] %-4.0fHz %-4.0fms "  \
+					"$(printf "%$((passedTime*10/totaltime))s" | tr ' ' '=')" \
+					"$freq" "$len"
+
+				if [ "$afterLast" = 1 ];then
+					/bin/beep -f "$freq" -l "$len" -r "$repeat" -D "$delay"
+				else
+					/bin/beep -f "$freq" -l "$len" -r "$repeat" -d "$delay"
+				fi
+				freq=440
+				len=200
+				delay=100
+				repeat=1
+				afterLast=0
+				;;
+			-f)shift; freq=$1;;
+			-l)shift; len=$1;;
+			-d)shift; afterLast=0; delay=$1;;
+			-D)shift; afterLast=1; delay=$1;;
+			-r)shift; repeat=$1;;
+			-f*)freq=${1#??};;
+			-l*)len=${1#??};;
+			-d*)afterLast=0; delay=${1#??};;
+			-D*)afterLast=1; delay=${1#??};;
+			-r*)repeat=${1#??};;
+		esac
+
+		if [ $# = 1 ];then
+				printf "\r%s [==========] %-4.0fHz %-4.0fms " \
+					"$file" "$freq" "$len"
+
+				if [ "$afterLast" = 1 ];then
+					/bin/beep -f "$freq" -l "$len" -r "$repeat" -D "$delay"
+				else
+					/bin/beep -f "$freq" -l "$len" -r "$repeat" -d "$delay"
+				fi
+				break
+		fi
+
+		shift
+	done
+}
+
+main "$@"
