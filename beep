@@ -1,0 +1,274 @@
+#!/usr/bin/env python3
+"""
+beep - a drop-in replacement for the classic PC-speaker `beep`, for machines
+that have no pcspkr. Parses the same flags and renders the tones through
+whatever modern audio stack is available (PipeWire / ALSA / Pulse / sox / ffmpeg).
+
+Put this earlier in $PATH than /usr/bin/beep and every beeps/*.sh script plays
+unmodified.
+
+Flags (matching the original beep):
+  -f FREQ     frequency in Hz                      (default 440)
+  -l LEN      length of the tone in ms             (default 200)
+  -r REPS     repeat the current tone REPS times   (default 1)
+  -d DELAY    delay in ms between reps, NOT after the last   (default 100)
+  -D DELAY    delay in ms between reps, INCLUDING after the last
+  -n, --new   end the current tone and start a fresh one
+  -s          read lines from stdin, beep after each
+  -c          read chars from stdin, beep after each
+  -e DEVICE   (accepted and ignored - no device needed)
+  -v, -V, --verbose / --debug   print what's being played
+  -h, --help  this help
+
+Environment knobs:
+  BEEP_WAVE=square|sine|triangle   waveform (default square - authentic buzz)
+  BEEP_VOLUME=0..100               output level (default 50)
+  BEEP_FADE_MS=N                   anti-click fade per tone edge (default 2)
+  BEEP_RATE=N                      sample rate (default 44100)
+  BEEP_PLAYER=name                 force a known player by name
+                                   (pw-cat | aplay | play | ffplay | paplay)
+  BEEP_COMMAND="cmd ..."           full custom command that reads a WAV stream on stdin
+"""
+
+import sys
+import signal
+
+_child = None  # the running audio player, so SIGINT can stop it
+
+
+def _on_sigint(*_):
+    # Ctrl-C: stop playback and exit quietly
+    global _child
+    if _child is not None and _child.poll() is None:
+        try:
+            _child.terminate()
+        except Exception:
+            pass
+    sys.exit(130)
+
+
+signal.signal(signal.SIGINT, _on_sigint)
+
+import math
+import os
+import shutil
+import struct
+import subprocess
+from array import array
+
+RATE   = int(os.environ.get("BEEP_RATE", "44100"))
+WAVE   = os.environ.get("BEEP_WAVE", "square").lower()
+VOLUME = max(0, min(100, int(float(os.environ.get("BEEP_VOLUME", "50")))))
+FADEMS = float(os.environ.get("BEEP_FADE_MS", "2"))
+VERBOSE = False
+
+AMP = int(VOLUME / 100 * 32767)
+
+
+def log(*a):
+    if VERBOSE:
+        print("beep:", *a, file=sys.stderr)
+
+
+def sample(phase):
+    # phase is in [0,1)
+    if WAVE == "sine":
+        return math.sin(2 * math.pi * phase)
+    if WAVE == "triangle":
+        return 4 * abs(phase - 0.5) - 1
+    # square (default) - the authentic 1-bit PC-speaker shape
+    return 1.0 if phase < 0.5 else -1.0
+
+
+def tone_samples(freq, length_ms):
+    n = int(RATE * length_ms / 1000.0)
+    buf = array("h", bytes(2 * n))
+    if freq <= 0 or n == 0:
+        return buf
+    fade = min(int(RATE * FADEMS / 1000.0), n // 2)
+    step = freq / RATE
+    phase = 0.0
+    for i in range(n):
+        s = sample(phase) * AMP
+        if fade:
+            if i < fade:
+                s *= i / fade
+            elif i >= n - fade:
+                s *= (n - i) / fade
+        buf[i] = int(s)
+        phase += step
+        if phase >= 1.0:
+            phase -= 1.0
+    return buf
+
+
+def silence_samples(length_ms):
+    n = int(RATE * length_ms / 1000.0)
+    return array("h", bytes(2 * n))
+
+
+class Tone:
+    __slots__ = ("freq", "length", "reps", "delay", "end_delay")
+
+    def __init__(self):
+        self.freq = 440.0
+        self.length = 200.0
+        self.reps = 1
+        self.delay = 100.0
+        self.end_delay = False
+
+    def render(self, out):
+        for i in range(self.reps):
+            log(f"f={self.freq} l={self.length} ({i+1}/{self.reps})")
+            out.extend(tone_samples(self.freq, self.length))
+            last = i == self.reps - 1
+            if (not last) or self.end_delay:
+                out.extend(silence_samples(self.delay))
+
+
+VALUE_OPTS = set("flrdDe")
+
+
+def normalize(argv):
+    # Expand getopt-style attached forms so the main parser only sees the
+    # space-separated shape: -f261.6 -> -f 261.6 ; --freq=261.6 -> --freq 261.6
+    out = []
+    for a in argv:
+        if a.startswith("--") and "=" in a:
+            k, v = a.split("=", 1)
+            out += [k, v]
+        elif len(a) > 2 and a[0] == "-" and a[1] != "-" and a[1] in VALUE_OPTS:
+            out += [a[:2], a[2:]]
+        else:
+            out.append(a)
+    return out
+
+
+def parse(argv):
+    argv = normalize(argv)
+    tones = []
+    cur = Tone()
+    stdin_mode = None
+    i = 0
+
+    def need(idx):
+        if idx + 1 >= len(argv):
+            sys.exit(f"beep: option {argv[idx]} requires an argument")
+        return argv[idx + 1]
+
+    while i < len(argv):
+        a = argv[i]
+        if a in ("-f", "--freq"):
+            cur.freq = float(need(i)); i += 2
+        elif a in ("-l", "--length"):
+            cur.length = float(need(i)); i += 2
+        elif a in ("-r", "--reps"):
+            cur.reps = int(float(need(i))); i += 2
+        elif a in ("-d", "--delay"):
+            cur.delay = float(need(i)); cur.end_delay = False; i += 2
+        elif a in ("-D", "--Delay"):
+            cur.delay = float(need(i)); cur.end_delay = True; i += 2
+        elif a in ("-n", "--new"):
+            tones.append(cur); cur = Tone(); i += 1
+        elif a in ("-s", "--stdin"):
+            stdin_mode = "line"; i += 1
+        elif a in ("-c", "--char"):
+            stdin_mode = "char"; i += 1
+        elif a in ("-e", "--device"):
+            need(i); i += 2  # accepted, ignored
+        elif a in ("-v", "-V", "--verbose", "--debug"):
+            global VERBOSE
+            VERBOSE = True; i += 1
+        elif a in ("-h", "--help"):
+            print(__doc__); sys.exit(0)
+        else:
+            sys.exit(f"beep: unknown option {a!r} (try --help)")
+
+    tones.append(cur)
+    return tones, stdin_mode
+
+
+# All of these auto-detect a WAV container read from stdin. Order = preference.
+PLAYERS = [
+    ("pw-cat",  ["pw-cat", "-p", "-"]),
+    ("aplay",   ["aplay", "-q", "-"]),
+    ("play",    ["play", "-q", "-t", "wav", "-"]),
+    ("ffplay",  ["ffplay", "-autoexit", "-nodisp", "-loglevel", "quiet", "-i", "-"]),
+    ("paplay",  ["paplay", "-"]),
+]
+
+
+def pick_player():
+    # 1. BEEP_COMMAND: a full custom command line, used verbatim.
+    cmd = os.environ.get("BEEP_COMMAND")
+    if cmd:
+        return cmd.split()
+
+    # 2. BEEP_PLAYER: pick a known candidate by name.
+    name = os.environ.get("BEEP_PLAYER")
+    if name:
+        for n, c in PLAYERS:
+            if n == name:
+                return c
+        valid = ", ".join(n for n, _ in PLAYERS)
+        sys.exit(f"beep: unknown BEEP_PLAYER {name!r} (known: {valid}; "
+                 f"or set BEEP_COMMAND for a full command line)")
+
+    # 3. Auto-detect the first available candidate.
+    for n, c in PLAYERS:
+        if shutil.which(n):
+            return c
+    valid = ", ".join(n for n, _ in PLAYERS)
+    sys.exit(f"beep: no audio player found (need one of: {valid})")
+
+
+def wav_bytes(pcm):
+    data = pcm.tobytes()
+    byte_rate = RATE * 2  # mono, 16-bit
+    return b"".join([
+        b"RIFF", struct.pack("<I", 36 + len(data)), b"WAVE",
+        b"fmt ", struct.pack("<IHHIIHH", 16, 1, 1, RATE, byte_rate, 2, 16),
+        b"data", struct.pack("<I", len(data)), data,
+    ])
+
+
+def play(pcm):
+    global _child
+    if not pcm:
+        return
+    cmd = pick_player()
+    log("player:", " ".join(cmd))
+    try:
+        _child = subprocess.Popen(cmd, stdin=subprocess.PIPE)
+        _child.communicate(wav_bytes(pcm))
+    except BrokenPipeError:
+        pass
+    finally:
+        _child = None
+
+
+def main():
+    tones, stdin_mode = parse(sys.argv[1:])
+
+    if stdin_mode:
+        # Beep once per line/char read from stdin, passing the text through.
+        proto = tones[-1]
+        while True:
+            ch = sys.stdin.read(1) if stdin_mode == "char" else sys.stdin.readline()
+            if ch == "":
+                break
+            sys.stdout.write(ch); sys.stdout.flush()
+            if stdin_mode == "char" or ch.endswith("\n"):
+                out = array("h")
+                proto.render(out)
+                play(out)
+        return
+
+    out = array("h")
+    for t in tones:
+        t.render(out)
+    play(out)
+
+
+if __name__ == "__main__":
+    main()
