@@ -28,6 +28,10 @@ Environment knobs:
   BEEP_PLAYER=name                 force a known player by name
                                    (pw-cat | aplay | play | ffplay | paplay)
   BEEP_COMMAND="cmd ..."           full custom command that reads a WAV stream on stdin
+  BEEP_REAL=1|auto|path            proxy straight to the genuine PC-speaker `beep`
+                                   instead of synthesizing audio. "1"/"auto"/"yes"
+                                   searches $PATH for a beep that isn't this script;
+                                   a path or command name uses that binary directly.
 """
 
 import sys
@@ -198,6 +202,29 @@ PLAYERS = [
 ]
 
 
+def find_real_beep():
+    """Locate the genuine PC-speaker `beep` to proxy to (for BEEP_REAL)."""
+    me = os.path.realpath(os.path.abspath(globals().get("__file__") or sys.argv[0]))
+    val = os.environ.get("BEEP_REAL", "").strip()
+
+    # An explicit path or command name overrides autodetection.
+    if val and val.lower() not in ("1", "auto", "yes", "true", "on"):
+        target = val if os.sep in val else (shutil.which(val) or "")
+        if not target:
+            sys.exit(f"beep: BEEP_REAL={val!r} not found")
+        if os.path.realpath(target) == me:
+            sys.exit("beep: BEEP_REAL points back at this script (would loop)")
+        return target
+
+    # Otherwise walk $PATH for the next `beep` that isn't this script.
+    for d in os.environ.get("PATH", "").split(os.pathsep):
+        cand = os.path.join(d or ".", "beep")
+        if os.path.isfile(cand) and os.access(cand, os.X_OK):
+            if os.path.realpath(cand) != me:
+                return cand
+    sys.exit("beep: BEEP_REAL set but no real `beep` found in $PATH")
+
+
 def pick_player():
     # 1. BEEP_COMMAND: a full custom command line, used verbatim.
     cmd = os.environ.get("BEEP_COMMAND")
@@ -248,6 +275,15 @@ def play(pcm):
 
 
 def main():
+    # BEEP_REAL: hand the original arguments straight to the genuine
+    # PC-speaker `beep` and step out of the way entirely.
+    if os.environ.get("BEEP_REAL", "").strip():
+        real = find_real_beep()
+        try:
+            os.execv(real, [real] + sys.argv[1:])
+        except OSError as e:
+            sys.exit(f"beep: failed to exec {real}: {e}")
+
     tones, stdin_mode = parse(sys.argv[1:])
 
     if stdin_mode:
